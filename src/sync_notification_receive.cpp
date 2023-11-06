@@ -26,32 +26,27 @@ void notification_callback(const ActionSyncData::Notification& msg)
 }
 
 int main() 
+try 
 {
+    std::cout << "=== [Subscriber] Create reader." << std::endl;
+
     signal (SIGINT, my_handler);
+    temoto::Subscriber<ActionSyncData::Notification> notification_sub("ActionSyncData_Notification", notification_callback);
 
-    try {
-        std::cout << "=== [Subscriber] Create reader." << std::endl;
-
-        temoto::Subscriber<ActionSyncData::Notification> notification_sub("ActionSyncData_Notification", notification_callback);
-
-        while(!stop)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        
-    }
-    catch (const dds::core::Exception& e)
+    while(!stop)
     {
-        std::cerr << "=== [Subscriber] DDS exception: " << e.what() << std::endl;
-        return EXIT_FAILURE;
-    } 
-    catch (const std::exception& e)
-    {
-        std::cerr << "=== [Subscriber] C++ exception: " << e.what() << std::endl;
-        return EXIT_FAILURE;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-
-    std::cout << "=== [Subscriber] Done." << std::endl;
-
+    
     return EXIT_SUCCESS;
+}
+catch (const dds::core::Exception& e)
+{
+    std::cerr << "=== [Subscriber] DDS exception: " << e.what() << std::endl;
+    return EXIT_FAILURE;
+} 
+catch (const std::exception& e)
+{
+    std::cerr << "=== [Subscriber] C++ exception: " << e.what() << std::endl;
+    return EXIT_FAILURE;
 }

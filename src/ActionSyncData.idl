@@ -1,5 +1,12 @@
 module ActionSyncData
 {
+  struct Ready
+  {
+    string actor_name;
+    string graph_name;
+    unsigned long long timestamp;
+  };
+
   struct Waitable
   {
     string actor_name;

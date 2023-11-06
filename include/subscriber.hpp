@@ -42,7 +42,7 @@ template<typename T>
 class Subscriber
 {
 public:
-    Subscriber(std::string topic_name, CallbackType<T> callback)
+    Subscriber(const std::string& topic_name, CallbackType<T> callback)
     : participant_(domain::default_id())
     , topic_(participant_, topic_name)
     , subscriber_(participant_)
@@ -58,5 +58,4 @@ private:
     DataListener<T> listener_;
     dds::sub::DataReader<T> reader_;
 };
-
 }
