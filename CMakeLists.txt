@@ -27,10 +27,10 @@ target_link_libraries(action_sync_cyclone_dds
 )
 class_loader_hide_library_symbols(action_sync_cyclone_dds)
 
-add_executable(consensus_test src/consensus_test.cpp)
-target_link_libraries(consensus_test 
+add_executable(handshake_test src/handshake_test.cpp)
+target_link_libraries(handshake_test 
   actionsyncdata  
   CycloneDDS-CXX::ddscxx
   pthread 
   temoto_action_engine)
-set_property(TARGET consensus_test PROPERTY CXX_STANDARD 17)
+set_property(TARGET handshake_test PROPERTY CXX_STANDARD 17)

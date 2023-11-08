@@ -1,10 +1,17 @@
 module ActionSyncData
 {
-  struct Ready
+  struct NameStamped
+  {
+    string actor_name;
+    unsigned long long timestamp;
+  };
+
+  struct Handshake
   {
     string actor_name;
     string graph_name;
     unsigned long long timestamp;
+    sequence<NameStamped> other_actors;
   };
 
   struct Waitable

@@ -21,7 +21,7 @@ int main(int argc, char** argv)
 
     if (p->waitForConsensus(graph_name, other_actors, 5000))
     {
-        std::cout << actor_name << ": Consensus reached for graph " << graph_name << std::endl;
+        std::cout << actor_name << ": Successful handshake between participants reached for graph " << graph_name << std::endl;
         return 0;
     }
     else

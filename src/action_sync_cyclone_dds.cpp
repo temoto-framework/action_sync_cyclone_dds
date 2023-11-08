@@ -26,14 +26,17 @@
 #include "temoto_action_engine/action_synchronizer_plugin_base.h"
 
 using namespace std::chrono;
+// using HandshakeBuffer = std::map<std::string, std::vector<std::pair<std::string, uint64_t>>>;
 
 class action_sync_cyclone_dds : public ActionSynchronizerPluginBase
 {
 public:
 
   action_sync_cyclone_dds() 
-  : sub_ready_("ready", std::bind(&action_sync_cyclone_dds::readyCallback, this, std::placeholders::_1))
-  , pub_ready_("ready")
+  : sub_handshake_("handshake", std::bind(&action_sync_cyclone_dds::handshakeCallback, this, std::placeholders::_1))
+  , pub_handshake_("handshake")
+  , sub_notification_("notification", std::bind(&action_sync_cyclone_dds::notificationCallback, this, std::placeholders::_1))
+  , pub_notification_("notification")
   {
     setName("NO_NAME");
     std::cout << __func__ << " constructed" << std::endl;
@@ -46,30 +49,47 @@ public:
 
   virtual bool waitForConsensus(const std::string& graph_name, const std::vector<std::string> other_actors, size_t timeout)
   {
-    ActionSyncData::Ready ready_msg;
-    ready_msg.actor_name(actor_name_);
-    ready_msg.graph_name(graph_name);
-
+    auto all_keys{getHandshakeKeys(other_actors)};
     bool consensus_reached{false};
     bool timeout_reached{false};
     auto start_time{high_resolution_clock::now()};
-    unsigned int pub_count{0};
 
+    /*
+     * Start concurrently publishing locally registered handshakes
+     */
     std::thread ready_pub_thread{[&]
     {
+      ActionSyncData::Handshake handshake_msg;
+      handshake_msg.actor_name(actor_name_);
+      handshake_msg.graph_name(graph_name);
+
       while(!consensus_reached && !timeout_reached)
       {
-        ready_msg.timestamp(duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count());
-        pub_ready_.publish(ready_msg);
-        pub_count++;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+
+        auto hb_it{handshake_buffers_.find(graph_name)};
+        if (hb_it != handshake_buffers_.end())
+        {
+          std::vector<ActionSyncData::NameStamped> other_handshakes;
+          for (const auto& a : other_actors)
+          {
+            std::string key{actor_name_ + "_" + a};
+            if (hb_it->second.find(key) != hb_it->second.end())
+              other_handshakes.push_back(ActionSyncData::NameStamped(a, hb_it->second[key]));
+          }
+
+          handshake_msg.other_actors(other_handshakes);
+        }
+
+        handshake_msg.timestamp(duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count());
+        pub_handshake_.publish(handshake_msg);
       }
     }};
 
-    // TODO: REMOVE. Wait until at least some msgs are sent. Replace by proper handshake protocol 
-    while(pub_count < 4)
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
+    /*
+     * Periodically check if all participants have heared from eachother
+     */
     while(!consensus_reached && !timeout_reached)
     {
       auto current_time{high_resolution_clock::now()};
@@ -80,19 +100,20 @@ public:
       }
 
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      std::lock_guard<std::mutex> l(handshake_buffer_mutex_);
+      std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
 
-      auto hb_it{handshake_buffer_.find(graph_name)};
-      if (hb_it == handshake_buffer_.end())
+      auto hb_it{handshake_buffers_.find(graph_name)};
+      if (hb_it == handshake_buffers_.end())
         continue;
 
       bool all_found{true};
       auto current_time_epoch{duration_cast<milliseconds>(current_time.time_since_epoch()).count()};
-      for (const auto& other_actor : other_actors)
+      for (const auto& key : all_keys)
       {
-        auto hb_actor_it{hb_it->second.find(other_actor)};
-        if (hb_actor_it == hb_it->second.end() ||
-          (int64_t)current_time_epoch - (int64_t)hb_actor_it->second >= (int64_t)timeout)
+        auto hb_key_it{hb_it->second.find(key)};
+
+        if (hb_key_it == hb_it->second.end() ||
+          (int64_t)current_time_epoch - (int64_t)hb_key_it->second >= (int64_t)timeout)
         {
           all_found = false;
           continue;
@@ -109,35 +130,82 @@ public:
     while(!ready_pub_thread.joinable()){}
     ready_pub_thread.join();
 
+    std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+    handshake_buffers_.erase(graph_name);
+
     return consensus_reached;
   }
 
 private:
 
-  void readyCallback(const ActionSyncData::Ready& msg)
+  void handshakeCallback(const ActionSyncData::Handshake& msg)
   {
     if (msg.actor_name() == actor_name_)
         return;
 
-    std::lock_guard<std::mutex> l(handshake_buffer_mutex_);
-    if (handshake_buffer_.find(msg.graph_name()) == handshake_buffer_.end())
+    std::string key{actor_name_ + "_" + msg.actor_name()};
+    std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+
+    /*
+     * Update the local handshakes
+     */
+    if (handshake_buffers_.find(msg.graph_name()) == handshake_buffers_.end())
     {
-      handshake_buffer_.insert
+      handshake_buffers_.insert
       ({
         msg.graph_name(),
-        std::map<std::string, uint64_t>{{msg.actor_name(), msg.timestamp()}}
+        std::map<std::string, uint64_t>{{key, msg.timestamp()}}
       });
       return;
     }
 
-    handshake_buffer_[msg.graph_name()][msg.actor_name()] = msg.timestamp();
+    handshake_buffers_[msg.graph_name()][key] = msg.timestamp();
+
+    /*
+     * Update the remote handshakes
+     */
+    for (const auto& a : msg.other_actors())
+    {
+      handshake_buffers_[msg.graph_name()][msg.actor_name() + "_" + a.actor_name()] = a.timestamp();
+    }
+
     return;
   }
 
-  temoto::Subscriber<ActionSyncData::Ready> sub_ready_;
-  temoto::Publisher<ActionSyncData::Ready> pub_ready_;
-  std::map<std::string, std::map<std::string, uint64_t>> handshake_buffer_;
-  std::mutex handshake_buffer_mutex_;
+  void notificationCallback(const ActionSyncData::Notification& msg)
+  {
+  }
+
+  std::vector<std::string> getHandshakeKeys(const std::vector<std::string>& other_actors)
+  {
+    std::vector<std::string> keys;
+
+    /*
+     * Generate "self_other", "other_self", and "other_other" combinations
+     */
+    for (const auto& oa : other_actors)
+    {
+      keys.push_back(actor_name_ + "_" + oa); // "self_other"
+      keys.push_back(oa + "_" + actor_name_); // "other_self"
+
+      for (const auto& ooa : other_actors)    // "other_other"
+      {
+        if (oa != ooa)
+          keys.push_back(oa + "_" + ooa);
+      }
+    }
+
+    return keys;
+  }
+
+  temoto::Subscriber<ActionSyncData::Handshake> sub_handshake_;
+  temoto::Publisher<ActionSyncData::Handshake> pub_handshake_;
+
+  temoto::Subscriber<ActionSyncData::Notification> sub_notification_;
+  temoto::Publisher<ActionSyncData::Notification> pub_notification_;
+
+  std::map<std::string, std::map<std::string, uint64_t>> handshake_buffers_;
+  std::mutex handshake_buffers_mutex_;
   
 };
 
