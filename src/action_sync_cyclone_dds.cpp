@@ -38,17 +38,51 @@ public:
   , sub_notification_("notification", std::bind(&action_sync_cyclone_dds::notificationCallback, this, std::placeholders::_1))
   , pub_notification_("notification")
   {
-    setName("NO_NAME");
     std::cout << __func__ << " constructed" << std::endl;
   }
 
-  virtual void sendNotification(const Waitable& waitable, const std::string& result, const std::string& params)
+  virtual bool notify(const Notification& notification)
   {
-    std::cout << __func__ << ": " << waitable.action_name << ", etc" << std::endl;
+    ActionSyncData::Notification n;
+    n.result(notification.result);
+    n.parameters(notification.parameters);
+
+    n.waitable(ActionSyncData::Waitable(
+      notification.waitable.actor_name,
+      notification.waitable.action_name,
+      notification.waitable.graph_name));
+
+    n.notification_id(notification.waitable.actor_name + "__" +
+      notification.waitable.graph_name + "__" +
+      notification.waitable.action_name + "__" +
+      std::to_string(duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count())
+    );
+
+    std::cout << "[" << actor_name_ << "] sending notification '" << n.notification_id() << "'" << std::endl;
+
+    /*
+     * Start sending the notification messages
+     */
+
+    // for(size_t i{0}; i < 1; i++)
+    // {
+    //   pub_notification_.publish(n);
+    //   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // }
+    pub_notification_.publish(n);
+
+    return true;
   }
 
-  virtual bool waitForConsensus(const std::string& graph_name, const std::vector<std::string> other_actors, size_t timeout)
+  virtual bool handshake(const std::string& handshake_token, const std::set<std::string> other_actors, size_t timeout)
   {
+    std::cout << "[" << actor_name_ << "] performing handshake with ";
+    for(const auto oa : other_actors)
+    {
+      std::cout << oa << ", ";
+    }
+    std::cout << std::endl;
+
     auto all_keys{getHandshakeKeys(other_actors)};
     bool consensus_reached{false};
     bool timeout_reached{false};
@@ -61,14 +95,14 @@ public:
     {
       ActionSyncData::Handshake handshake_msg;
       handshake_msg.actor_name(actor_name_);
-      handshake_msg.graph_name(graph_name);
+      handshake_msg.handshake_token(handshake_token);
 
       while(!consensus_reached && !timeout_reached)
       {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+        std::unique_lock<std::mutex> l(handshake_buffers_mutex_);
 
-        auto hb_it{handshake_buffers_.find(graph_name)};
+        auto hb_it{handshake_buffers_.find(handshake_token)};
         if (hb_it != handshake_buffers_.end())
         {
           std::vector<ActionSyncData::NameStamped> other_handshakes;
@@ -82,6 +116,7 @@ public:
           handshake_msg.other_actors(other_handshakes);
         }
 
+        l.unlock();
         handshake_msg.timestamp(duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count());
         pub_handshake_.publish(handshake_msg);
       }
@@ -102,7 +137,7 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
 
-      auto hb_it{handshake_buffers_.find(graph_name)};
+      auto hb_it{handshake_buffers_.find(handshake_token)};
       if (hb_it == handshake_buffers_.end())
         continue;
 
@@ -131,7 +166,7 @@ public:
     ready_pub_thread.join();
 
     std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
-    handshake_buffers_.erase(graph_name);
+    handshake_buffers_.erase(handshake_token);
 
     return consensus_reached;
   }
@@ -140,8 +175,11 @@ private:
 
   void handshakeCallback(const ActionSyncData::Handshake& msg)
   {
-    if (msg.actor_name() == actor_name_)
+    // Ignore self
+    if (msg.actor_name() == actor_name_ || actor_name_.empty())
         return;
+
+    std::cout << "[" << actor_name_ << "] got handshake msg from '" << msg.actor_name() << "'" << std::endl;
 
     std::string key{actor_name_ + "_" + msg.actor_name()};
     std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
@@ -149,24 +187,24 @@ private:
     /*
      * Update the local handshakes
      */
-    if (handshake_buffers_.find(msg.graph_name()) == handshake_buffers_.end())
+    if (handshake_buffers_.find(msg.handshake_token()) == handshake_buffers_.end())
     {
       handshake_buffers_.insert
       ({
-        msg.graph_name(),
+        msg.handshake_token(),
         std::map<std::string, uint64_t>{{key, msg.timestamp()}}
       });
       return;
     }
 
-    handshake_buffers_[msg.graph_name()][key] = msg.timestamp();
+    handshake_buffers_[msg.handshake_token()][key] = msg.timestamp();
 
     /*
      * Update the remote handshakes
      */
     for (const auto& a : msg.other_actors())
     {
-      handshake_buffers_[msg.graph_name()][msg.actor_name() + "_" + a.actor_name()] = a.timestamp();
+      handshake_buffers_[msg.handshake_token()][msg.actor_name() + "_" + a.actor_name()] = a.timestamp();
     }
 
     return;
@@ -174,9 +212,38 @@ private:
 
   void notificationCallback(const ActionSyncData::Notification& msg)
   {
+    // Ignore self and dont invoke uninitialized callback
+    if (msg.waitable().actor_name() == actor_name_ || notification_received_cb_ == nullptr)
+      return;
+
+    std::lock_guard<std::mutex> l(processed_notification_mutex_); // Deliberately left closed for the whole scope
+
+    if (processsed_notifications_.find(msg.notification_id()) != processsed_notifications_.end())
+    {
+      return;
+    }
+
+    std::cout << "[" << actor_name_ << "] got notification '" << msg.notification_id() << "'" << std::endl;
+
+    auto ret = processsed_notifications_.insert({
+      msg.notification_id(), 
+      duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count()
+    });
+
+    Notification n{
+      .parameters = msg.parameters(),
+      .result     = msg.result(),
+      .waitable   = Waitable{
+        .action_name = msg.waitable().action_name(),
+        .actor_name  = msg.waitable().actor_name(),
+        .graph_name  = msg.waitable().graph_name()
+      }
+    };
+
+    notification_received_cb_(n);
   }
 
-  std::vector<std::string> getHandshakeKeys(const std::vector<std::string>& other_actors)
+  std::vector<std::string> getHandshakeKeys(const std::set<std::string>& other_actors)
   {
     std::vector<std::string> keys;
 
@@ -206,6 +273,9 @@ private:
 
   std::map<std::string, std::map<std::string, uint64_t>> handshake_buffers_;
   std::mutex handshake_buffers_mutex_;
+
+  std::map<std::string, uint64_t> processsed_notifications_;
+  std::mutex processed_notification_mutex_;
   
 };
 

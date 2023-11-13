@@ -9,7 +9,7 @@ module ActionSyncData
   struct Handshake
   {
     string actor_name;
-    string graph_name;
+    string handshake_token;
     unsigned long long timestamp;
     sequence<NameStamped> other_actors;
   };
@@ -23,8 +23,9 @@ module ActionSyncData
 
   struct Notification
   {
-    string actor_name;
     string parameters;
+    string result;
+    string notification_id;
     Waitable waitable;
   };
 };
