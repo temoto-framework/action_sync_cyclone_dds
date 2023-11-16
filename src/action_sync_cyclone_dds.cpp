@@ -41,7 +41,7 @@ public:
     std::cout << __func__ << " constructed" << std::endl;
   }
 
-  virtual bool notify(const Notification& notification)
+  virtual bool notify(const Notification& notification, const std::set<std::string> other_actors, const size_t timeout)
   {
     ActionSyncData::Notification n;
     n.result(notification.result);
@@ -58,23 +58,116 @@ public:
       std::to_string(duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count())
     );
 
-    std::cout << "[" << actor_name_ << "] sending notification '" << n.notification_id() << "'" << std::endl;
+    bool handshakes_received{false};
+    bool timeout_reached{false};
+    auto start_time{high_resolution_clock::now()};
+    std::string handshake_token = n.notification_id();
+    std::vector<std::string> all_keys;
+
+    for (const auto& oa : other_actors)
+      all_keys.push_back(actor_name_ + "_" + oa);
+
+    std::cout << "[" << actor_name_ << "] sending notification '" << n.notification_id() << "' and waiting for acks from ";
+
+    for (const auto& k : all_keys)
+      std::cout << k << ", ";
+
+    std::cout << std::endl;
+
+    // Create a new dummy entry
+    {
+      std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+      handshake_buffers_.insert
+      ({
+        handshake_token,
+        std::map<std::string, uint64_t>{{actor_name_ + "_" + actor_name_, 0}}
+      });
+    }
 
     /*
      * Start sending the notification messages
      */
+    std::thread send_notifications_thread{[&]
+    {
+      while(!handshakes_received && !timeout_reached)
+      {
+        pub_notification_.publish(n);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }};
 
-    // for(size_t i{0}; i < 1; i++)
-    // {
-    //   pub_notification_.publish(n);
-    //   std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    // }
-    pub_notification_.publish(n);
+    /*
+     * Periodically check if all actors got the noticication
+     */
+    while(!handshakes_received && !timeout_reached)
+    {
+      auto current_time{high_resolution_clock::now()};
+      if (duration_cast<milliseconds>(current_time - start_time).count() >= timeout)
+      {
+        timeout_reached = true;
+        break;
+      }
 
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+
+      auto hb_it{handshake_buffers_.find(handshake_token)};
+      if (hb_it == handshake_buffers_.end())
+        continue;
+
+      bool all_found{true};
+      auto current_time_epoch{duration_cast<milliseconds>(current_time.time_since_epoch()).count()};
+      for (const auto& key : all_keys)
+      {
+        auto hb_key_it{hb_it->second.find(key)};
+
+        if (hb_key_it == hb_it->second.end() ||
+          (int64_t)current_time_epoch - (int64_t)hb_key_it->second >= (int64_t)timeout)
+        {
+          all_found = false;
+          continue;
+        }
+      }
+
+      if (all_found)
+      {
+        handshakes_received = true;
+        break;
+      }
+    }
+
+    while(!send_notifications_thread.joinable()){}
+    send_notifications_thread.join();
+
+    std::cout << "[" << actor_name_ << "] D2. hr=" << handshakes_received << ", to=" << timeout_reached << std::endl;
+
+    if (handshakes_received)
+    {
+      std::cout << "[" << actor_name_ << "] notification sent successfully '" << n.notification_id() << "'" << std::endl;
+    }
+    else
+    {
+      std::cout << "[" << actor_name_ << "] notification did not reach all actors '" << n.notification_id() << "'" << std::endl;
+    }
+
+    return handshakes_received;
+  }
+
+  virtual bool unidirHandshake(const std::string& handshake_token)
+  {
+    std::cout << "[" << actor_name_ << "] acknowledging '" << handshake_token << "'" << std::endl;
+
+    ActionSyncData::Handshake handshake_msg;
+    handshake_msg.type(ActionSyncData::HandshakeType::UNIDIRECTIONAL);
+    handshake_msg.actor_name(actor_name_);
+    handshake_msg.handshake_token(handshake_token);
+    handshake_msg.timestamp(duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count());
+
+    pub_handshake_.publish(handshake_msg);
     return true;
   }
 
-  virtual bool handshake(const std::string& handshake_token, const std::set<std::string> other_actors, size_t timeout)
+  virtual bool bidirHandshake(const std::string& handshake_token, const std::set<std::string> other_actors, const size_t timeout)
   {
     std::cout << "[" << actor_name_ << "] performing handshake with ";
     for(const auto oa : other_actors)
@@ -94,6 +187,7 @@ public:
     std::thread ready_pub_thread{[&]
     {
       ActionSyncData::Handshake handshake_msg;
+      handshake_msg.type(ActionSyncData::HandshakeType::BIDIRECTIONAL);
       handshake_msg.actor_name(actor_name_);
       handshake_msg.handshake_token(handshake_token);
 
@@ -179,10 +273,18 @@ private:
     if (msg.actor_name() == actor_name_ || actor_name_.empty())
         return;
 
-    std::cout << "[" << actor_name_ << "] got handshake msg from '" << msg.actor_name() << "'" << std::endl;
-
     std::string key{actor_name_ + "_" + msg.actor_name()};
     std::lock_guard<std::mutex> l(handshake_buffers_mutex_);
+
+    if (msg.type() == ActionSyncData::HandshakeType::BIDIRECTIONAL)
+    {
+      std::cout << "[" << actor_name_ << "] got handshake msg from '" << msg.actor_name() << "', with id '" << msg.handshake_token() << "'" << std::endl;
+    }
+    else if (msg.type() == ActionSyncData::HandshakeType::UNIDIRECTIONAL &&
+      handshake_buffers_.find(msg.handshake_token()) != handshake_buffers_.end())
+    {
+      std::cout << "[" << actor_name_ << "] got acknowledgement from '" << msg.actor_name() << "', with id '" << msg.handshake_token() << "'" << std::endl;
+    }
 
     /*
      * Update the local handshakes
@@ -218,10 +320,10 @@ private:
 
     std::lock_guard<std::mutex> l(processed_notification_mutex_); // Deliberately left closed for the whole scope
 
-    if (processsed_notifications_.find(msg.notification_id()) != processsed_notifications_.end())
-    {
-      return;
-    }
+    // if (processsed_notifications_.find(msg.notification_id()) != processsed_notifications_.end())
+    // {
+    //   return;
+    // }
 
     std::cout << "[" << actor_name_ << "] got notification '" << msg.notification_id() << "'" << std::endl;
 
@@ -233,6 +335,7 @@ private:
     Notification n{
       .parameters = msg.parameters(),
       .result     = msg.result(),
+      .id         = msg.notification_id(),
       .waitable   = Waitable{
         .action_name = msg.waitable().action_name(),
         .actor_name  = msg.waitable().actor_name(),

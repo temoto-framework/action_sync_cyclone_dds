@@ -6,8 +6,15 @@ module ActionSyncData
     unsigned long long timestamp;
   };
 
+  enum HandshakeType
+  {
+    BIDIRECTIONAL,
+    UNIDIRECTIONAL
+  };
+
   struct Handshake
   {
+    HandshakeType type;
     string actor_name;
     string handshake_token;
     unsigned long long timestamp;
@@ -23,6 +30,7 @@ module ActionSyncData
 
   struct Notification
   {
+
     string parameters;
     string result;
     string notification_id;
