@@ -7,7 +7,6 @@ find_package(class_loader REQUIRED)
 find_package(CycloneDDS-CXX REQUIRED)
 find_package(temoto_action_engine REQUIRED)
 
-idlcxx_generate(TARGET helloworlddata FILES src/HelloWorldData.idl WARNINGS no-implicit-extensibility)
 idlcxx_generate(TARGET actionsyncdata FILES src/ActionSyncData.idl WARNINGS no-implicit-extensibility)
 
 include_directories(include)
@@ -28,3 +27,10 @@ target_link_libraries(handshake_test
   pthread 
   temoto_action_engine)
 set_property(TARGET handshake_test PROPERTY CXX_STANDARD 17)
+
+install(TARGETS action_sync_cyclone_dds
+  EXPORT action_sync_cyclone_ddsTargets
+  ARCHIVE DESTINATION bin
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)

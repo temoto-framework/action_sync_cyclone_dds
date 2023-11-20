@@ -35,7 +35,7 @@ int main(int argc, char** argv)
     p->setName(actor_name);
     p->setNotificationReceivedCallback(&notificationCallback);
 
-    if (p->handshake(graph_name, other_actors, 5000))
+    if (p->bidirHandshake(graph_name, other_actors, 5000))
     {
         std::cout << actor_name << ": Successful handshake between participants reached for graph " << graph_name << std::endl;
     }
@@ -55,7 +55,7 @@ int main(int argc, char** argv)
             .graph_name  = graph_name
     }};
     
-    bool success = p->notify(notification);
+    bool success = p->notify(notification, other_actors, 5000);
     std::cout << "[" << duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count() << "] done with notify" << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
