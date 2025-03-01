@@ -1,12 +1,12 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Copyright 2023 TeMoto Framework
- * 
+ * Copyright 2025 TeMoto Framework
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,10 +15,13 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include <chrono>
-#include <class_loader/class_loader.hpp>
 #include <iostream>
 #include <map>
 #include <thread>
+
+#include <boost/config.hpp>
+#include <boost/shared_ptr.hpp>
+#include <boost/dll/alias.hpp>
 
 #include "ActionSyncData.hpp"
 #include "publisher.hpp"
@@ -32,7 +35,7 @@ class action_sync_cyclone_dds : public ActionSynchronizerPluginBase
 {
 public:
 
-  action_sync_cyclone_dds() 
+  action_sync_cyclone_dds()
   : sub_handshake_("handshake", std::bind(&action_sync_cyclone_dds::handshakeCallback, this, std::placeholders::_1))
   , pub_handshake_("handshake")
   , sub_notification_("notification", std::bind(&action_sync_cyclone_dds::notificationCallback, this, std::placeholders::_1))
@@ -328,7 +331,7 @@ private:
     std::cout << "[" << actor_name_ << "] got notification '" << msg.notification_id() << "'" << std::endl;
 
     auto ret = processsed_notifications_.insert({
-      msg.notification_id(), 
+      msg.notification_id(),
       duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count()
     });
 
@@ -338,8 +341,8 @@ private:
       .id         = msg.notification_id(),
       .waitable   = Waitable{
         .action_name = msg.waitable().action_name(),
+        .graph_name  = msg.waitable().graph_name(),
         .actor_name  = msg.waitable().actor_name(),
-        .graph_name  = msg.waitable().graph_name()
       }
     };
 
@@ -379,7 +382,12 @@ private:
 
   std::map<std::string, uint64_t> processsed_notifications_;
   std::mutex processed_notification_mutex_;
-  
+
 };
 
-CLASS_LOADER_REGISTER_CLASS(action_sync_cyclone_dds, ActionSynchronizerPluginBase);
+boost::shared_ptr<ActionSynchronizerPluginBase> factory()
+{
+    return boost::shared_ptr<action_sync_cyclone_dds>(new action_sync_cyclone_dds());
+}
+
+BOOST_DLL_ALIAS(factory, action_sync_cyclone_dds)
